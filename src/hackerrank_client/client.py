@@ -3,7 +3,7 @@
 Proven endpoint (from tashifkhan/hackerrank-stats-api):
   PROFILE  /rest/contests/master/hackers/{u}/profile  -> {"model": {...}}
 
-First version: just fetch one profile. More endpoints next.
+First version: profile + scores + badges. More endpoints next.
 """
 
 from __future__ import annotations
@@ -74,3 +74,34 @@ class HackerRankAPI:
             raise UpstreamError("upstream_error") from exc
         model = payload.get("model") if isinstance(payload, dict) else None
         return model if isinstance(model, dict) else {}
+
+    async def fetch_scores(self, username: str) -> list:
+        """GET /rest/hackers/{u}/scores_elo -> list of per-track scores."""
+        url = f"{BASE_URL}/rest/hackers/{username}/scores_elo"
+        response = await self._client.get(url)
+        if response.status_code == 404:
+            raise UserNotFound(f"user_not_found: {username}")
+        if response.status_code != 200:
+            raise UpstreamError("upstream_error", status=response.status_code)
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise UpstreamError("upstream_error") from exc
+        return payload if isinstance(payload, list) else []
+
+    async def fetch_badges(self, username: str) -> list:
+        """GET /rest/hackers/{u}/badges -> the ``models`` list."""
+        url = f"{BASE_URL}/rest/hackers/{username}/badges"
+        response = await self._client.get(url)
+        if response.status_code == 404:
+            raise UserNotFound(f"user_not_found: {username}")
+        if response.status_code != 200:
+            raise UpstreamError("upstream_error", status=response.status_code)
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise UpstreamError("upstream_error") from exc
+        if isinstance(payload, dict):
+            models = payload.get("models", [])
+            return models if isinstance(models, list) else []
+        return []
