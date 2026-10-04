@@ -1,12 +1,17 @@
 """Talk to HackerRank's public pages (no login needed).
 
-Proven endpoint (from tashifkhan/hackerrank-stats-api):
+Proven endpoints (from tashifkhan/hackerrank-stats-api):
   PROFILE  /rest/contests/master/hackers/{u}/profile  -> {"model": {...}}
+  SCORES   /rest/hackers/{u}/scores_elo               -> [...]
+  BADGES   /rest/hackers/{u}/badges                   -> {"models": [...]}
 
-First version: profile + scores + badges. More endpoints next.
+One shared request helper. A missing user is UserNotFound; a quiet account
+with no badges yet just gets [] instead of an error.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import httpx
 
@@ -20,6 +25,10 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     ),
 }
+
+# Endpoints allowed to be empty: a 404/500 or broken answer here returns an
+# empty default instead of failing the whole profile.
+_TOLERANT_ENDPOINTS = {"badges"}
 
 
 class HackerRankError(RuntimeError):
@@ -42,6 +51,13 @@ class UpstreamError(HackerRankError):
         self.status = status
 
 
+def _safe_json(response: httpx.Response) -> Any | None:
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
 class HackerRankAPI:
     """Small wrapper around httpx. One instance, close it when done."""
 
@@ -57,50 +73,53 @@ class HackerRankAPI:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def fetch_profile(self, username: str) -> dict:
-        """GET the profile -> the ``model`` dict.
+    async def _get_json(self, url: str, *, kind: str, default: Any = None) -> Any:
+        """GET url and return its JSON.
 
-        Unknown user raises UserNotFound, anything else bad raises UpstreamError.
+        Unknown user -> UserNotFound. Anything else bad -> UpstreamError,
+        except endpoints in _TOLERANT_ENDPOINTS which quietly return
+        ``default`` on 404/500/broken answers.
         """
-        url = f"{BASE_URL}/rest/contests/master/hackers/{username}/profile"
         response = await self._client.get(url)
-        if response.status_code == 404:
-            raise UserNotFound(f"user_not_found: {username}")
-        if response.status_code != 200:
-            raise UpstreamError("upstream_error", status=response.status_code)
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise UpstreamError("upstream_error") from exc
+        status = response.status_code
+        if status == 404:
+            if kind in _TOLERANT_ENDPOINTS:
+                return default
+            raise UserNotFound(f"user_not_found: {url}")
+        if status != 200:
+            if status == 500 and kind in _TOLERANT_ENDPOINTS:
+                return default
+            raise UpstreamError("upstream_error", status=status)
+        payload = _safe_json(response)
+        if payload is None:
+            if kind in _TOLERANT_ENDPOINTS:
+                return default
+            raise UpstreamError("upstream_error", status=status)
+        return payload
+
+    async def fetch_profile(self, username: str) -> dict:
+        """GET the profile -> the ``model`` dict."""
+        payload = await self._get_json(
+            f"{BASE_URL}/rest/contests/master/hackers/{username}/profile",
+            kind="profile",
+        )
         model = payload.get("model") if isinstance(payload, dict) else None
         return model if isinstance(model, dict) else {}
 
     async def fetch_scores(self, username: str) -> list:
         """GET /rest/hackers/{u}/scores_elo -> list of per-track scores."""
-        url = f"{BASE_URL}/rest/hackers/{username}/scores_elo"
-        response = await self._client.get(url)
-        if response.status_code == 404:
-            raise UserNotFound(f"user_not_found: {username}")
-        if response.status_code != 200:
-            raise UpstreamError("upstream_error", status=response.status_code)
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise UpstreamError("upstream_error") from exc
+        payload = await self._get_json(
+            f"{BASE_URL}/rest/hackers/{username}/scores_elo", kind="scores"
+        )
         return payload if isinstance(payload, list) else []
 
     async def fetch_badges(self, username: str) -> list:
-        """GET /rest/hackers/{u}/badges -> the ``models`` list."""
-        url = f"{BASE_URL}/rest/hackers/{username}/badges"
-        response = await self._client.get(url)
-        if response.status_code == 404:
-            raise UserNotFound(f"user_not_found: {username}")
-        if response.status_code != 200:
-            raise UpstreamError("upstream_error", status=response.status_code)
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise UpstreamError("upstream_error") from exc
+        """GET /rest/hackers/{u}/badges -> the ``models`` list ([] if none)."""
+        payload = await self._get_json(
+            f"{BASE_URL}/rest/hackers/{username}/badges",
+            kind="badges",
+            default={"models": []},
+        )
         if isinstance(payload, dict):
             models = payload.get("models", [])
             return models if isinstance(models, list) else []
