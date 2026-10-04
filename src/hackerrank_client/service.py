@@ -6,9 +6,11 @@ Bad entries are skipped, never crash — HackerRank changes shapes often.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from .schemas import Badge, ContestEntry, HeatmapDay
+from .client import HackerRankAPI, UserNotFound
+from .schemas import Badge, ContestEntry, HackerRankProfile, HeatmapDay
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -111,3 +113,105 @@ def decode_profile_model(model: Any, fallback_username: str) -> tuple[str, str]:
         or username
     ).strip()
     return username or fallback_username, display or username
+
+
+async def get_full_profile(
+    username: str, api: HackerRankAPI | None = None
+) -> HackerRankProfile:
+    """Fetch profile + scores + badges + contests + activity all at once
+    and pack them into one clean HackerRankProfile.
+
+    Unknown users raise UserNotFound. One flaky endpoint never blanks
+    the whole profile (the client already substitutes empty defaults).
+    """
+    handle = str(username).strip()
+    close_after = False
+    if api is None:
+        api = HackerRankAPI()
+        close_after = True
+    try:
+        # Ratings history is available via api.fetch_ratings but excluded
+        # from the hot path: the clean profile needs no rating data.
+        profile_model, scores, badge_models, contests_payload, submissions = (
+            await asyncio.gather(
+                api.fetch_profile(handle),
+                api.fetch_scores(handle),
+                api.fetch_badges(handle),
+                api.fetch_contests(handle),
+                api.fetch_submissions(handle),
+            )
+        )
+        # Recent challenges are fetched lazily for future use; failures must
+        # never break the profile (tolerated inside the client already).
+        try:
+            await api.fetch_recent(handle, limit=100)
+        except UserNotFound:
+            raise
+        except Exception:
+            pass
+
+        real_username, display_name = decode_profile_model(profile_model, handle)
+        badges = decode_badges(badge_models)
+        practice_score, _ = decode_scores(scores)
+        return HackerRankProfile(
+            username=real_username,
+            display_name=display_name,
+            badges=badges,
+            practice_score=practice_score,
+            total_solved=decode_total_solved(badges),
+            contests=decode_contests(contests_payload),
+        )
+    finally:
+        if close_after:
+            await api.close()
+
+
+async def get_badges(
+    username: str, api: HackerRankAPI | None = None
+) -> list[Badge]:
+    handle = str(username).strip()
+    close_after = False
+    if api is None:
+        api = HackerRankAPI()
+        close_after = True
+    try:
+        # fetch_badges tolerates 404/500 internally -> [] for quiet accounts,
+        # but a truly unknown handle should still 404: verify profile first.
+        await api.fetch_profile(handle)
+        return decode_badges(await api.fetch_badges(handle))
+    finally:
+        if close_after:
+            await api.close()
+
+
+async def get_contests(
+    username: str, api: HackerRankAPI | None = None
+) -> list[ContestEntry]:
+    """Experimental: upstream contest data is thin (name/slug only)."""
+    handle = str(username).strip()
+    close_after = False
+    if api is None:
+        api = HackerRankAPI()
+        close_after = True
+    try:
+        return decode_contests(await api.fetch_contests(handle))
+    finally:
+        if close_after:
+            await api.close()
+
+
+async def get_heatmap(
+    username: str, api: HackerRankAPI | None = None
+) -> list[HeatmapDay]:
+    """Experimental: daily activity from the submissions map, sorted by date."""
+    handle = str(username).strip()
+    close_after = False
+    if api is None:
+        api = HackerRankAPI()
+        close_after = True
+    try:
+        await api.fetch_profile(handle)  # 404 for unknown users
+        return decode_heatmap(await api.fetch_submissions(handle))
+    finally:
+        if close_after:
+            await api.close()
